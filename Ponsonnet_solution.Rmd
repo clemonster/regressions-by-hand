@@ -1,0 +1,453 @@
+---
+title: "Regressions"
+author: "Clement Ponsonnet"
+output:
+  html_document:
+    keep_md : true
+  html_notebook: default
+---
+
+## The objectives of the lab
+
+The purpose of this lab is to reproduce tables from the third chapter of the book "Elements of
+Statistical Learning" from Hastie, Tibshirani and Friedman. These tables can be found in the *tables_to_reproduce folder* (Table 3.1 and 3.2 for exercise 1, table 3.3 for exercise 2).
+
+###Ex 1 - Tables 3.1 and 3.2
+
+
+1) Prepare the data  
+  a) Raw data is available on the web at http://statweb.stanford.edu/~tibs/ElemStatLearn.1stEd/datasets/prostate.data . It has already been downloaded and is in the *data* folder.
+  
+```{r}
+data <- read.table("data/prostate.data", sep = "")
+data[32,2] = 3.8044  # strange science 
+
+```
+b) Extract and normalize the explicative variables
+
+```{r}
+X <- scale(data[,1:8])
+```
+c) Is it wise to normalize these data?
+```{r}
+summary(data)
+```
+In ordinary linear regression, we sometimes normalize data for numerical reasons, when they differ by a large order of magnitude. Here the ranges of the different variables are quite similar so it is not necessary to normalize. However here normalization was done by the textbook. Since we want to reproduce the tables of the textbook, we normalize our data.
+
+```{r}
+X <- scale(data[,1:8])
+```
+
+d) Extract the target variable
+
+```{r}
+Y <- as.matrix(data[,"lpsa"])
+```
+
+e) Split the data into train and test set
+
+```{r}
+Xtrain <- X[data[["train"]], ]
+Ytrain <- Y[data[["train"]],]
+Xtest <- X[!data[["train"]], ]
+Ytest <- Y[!data[["train"]], ]
+```
+
+2. Compute the correlations of predictors in the prostate cancer data as presented in  **Table 3.1**
+
+```{r}
+Xtrainscale <- scale(Xtrain)
+C <- cov(as.matrix(Xtrainscale))
+round(1000*C)/1000
+```
+
+3. Reproduce the results presented Table 3.2
+  a) Compute the coefficients of the linear regression model, without using the lm function
+(but you can use it validate your code)
+
+```{r}
+Xtrainone <- cbind(array(1, dim = c(nrow(Xtrain),1)), Xtrain)
+b <- solve(t(Xtrainone) %*% Xtrainone, t(Xtrainone) %*% Ytrain)
+```
+
+  b) Compute the prediction error
+  
+```{r}
+Ypred <- Xtrainone %*% b
+err <- Ytrain - Ypred
+```
+
+  c) Compute the standard error for each variable
+  
+```{r}
+sig2 <- (t(err) %*% err)/ (nrow(Xtrainone) - ncol(X) -1)
+v <- diag(solve(t(Xtrainone) %*% Xtrainone))
+stderr <- sqrt(as.vector(sig2)) * sqrt(v)
+```
+  
+  d) compute the Z score for each variable
+```{r}
+Z <- b/stderr
+```
+
+  e) visualize the results and compare with table 3.2
+
+```{r}
+table32 <- cbind(b,stderr,Z)
+round(100*table32)/100
+```
+
+###Ex. 2 — Your turn
+
+Reproduce Table 3.3, at least the first four columns that is LS, Best Subset, Ridge and Lasso.
+
+
+####LS column
+We already have the LS column, this corresponds to our **b** vector computed earlier. We need to compute the *Test error* and *Std error* entries for the LS column. For this we apply the model to our test set and compute prediction errors. 
+
+```{r}
+Xtestone <- cbind(array(1, dim = c(nrow(Xtest),1)), Xtest)
+Y_pred_test <- Xtestone %*% b
+err_test <- (Ytest - Y_pred_test)
+```
+
+```{r}
+table33 <- as.data.frame(c(b, mean(err_test^2), sd(err_test^2)/sqrt(length(err_test))));
+colnames(table33) <- "LS"
+```
+
+```{r}
+row.names(table33) <- c("Intercept", "lcavol", "lweight", "age", "lbph", "svi", "lcp", "gleason", "pgg45", "TEST ERROR", "STD ERROR")
+round(table33 *1000)/1000
+```
+
+
+####Best Subset
+
+To get the best subset, we need to iterate over the whole model space and fit all possible models. Some R functions such `leaps` are useful to do this. For this exercise, we will implement everything by hand and not rely on such packages.  
+In order find the best model, we will used 10-fold cross-validation on the training set and estimate the average prediction error of each model. We will choose the model that minimizes the cross validation prediction error on the training set. We'll then fit the selected model on the test set and calculate the last two lines of the table - Test Error and Std Error. The cross-validation procedure is explained in detail in section 7.10 of the book *Elements of Statistical Learning*
+
+We will build a function to fit a linear model, a function to calculate the 10-fold cross-validation error, and a function to put everything together.   
+We need an efficient way to iterate over all possible models. For this we construct the following dummy matrix:
+
+```{r}
+dummies = expand.grid(0:1, 0:1, 0:1, 0:1, 0:1, 0:1, 0:1, 0:1)
+head(dummies)
+dim(dummies)
+```
+Each row represents a model, a 1 in the ith column indicates that the ith variable is used in the model, while a 0 indicates this variable is absent.
+We have 256 total possible models.
+
+Let's first construct a function to fit linear models. It outputs a vector of estimated coefficients.
+```{r}
+fit_lin_reg <- function(x, y){
+  #This function should be given a matrix of type Xone (with a column of ones for the intercept term)
+  b <- solve(t(x) %*% x, t(x) %*% y)
+  
+  return(b)
+}
+```
+
+Now let's construct a function which will calculate the average ten-fold cross-validation error. It can take as input any function defining a regression model like our `fit_lin_reg` function. It outputs the mean and std deviation of the average prediction error on each cross validation set.
+
+```{r}
+ten_fold_cv <- function(x, y, FUN){
+  require(caret)
+  set.seed(78)
+  #Divide y and x into 10 equally sized sets.
+  #The set.seed(78) guarantees that results are reproducible, and that we always have the same partitioning
+  flds <- createFolds(y, k = 10, list = TRUE)
+  
+  #Create a vector which will take the error over each of the 10 sets
+  err <- numeric(10)
+  for (i in 1:10){
+    #One set is the test set, the 9 remaining are train sets
+    names(flds)[] <- "train"
+    names(flds)[i] <- "test"
+    #Fit the model over the 9 train sets
+    fit <- FUN(x = x[unlist(flds[names(flds) != "test" ], use.names = FALSE), ],  
+               y = y[unlist(flds[names(flds) != "test" ], use.names = FALSE)])
+    
+    #Predict on the test set
+    pred <- x[flds$test, ] %*% fit
+    #Calculate the test error
+    err[i] <- mean((y[flds$test] - pred)^2)
+  }
+  return(list(mean_err = mean(err), std_err = sd(err))) 
+}
+```
+
+Now let's build one last function which will first call our `ten_fold_cv` function to calculate the cross-validation error and second fit the model one last time over the whole set passed as input. Once again, through the input parameter `FUN`, we can pass any function defining a regression model. It outputs a list with the estimated parameters, the mean and the std deviation of the cross-validation error.
+
+```{r}
+fit_cv <- function(x, y, FUN){
+  err <- ten_fold_cv(x, y, FUN)
+  coeff <- FUN(x, y)
+  return(list(coeff = coeff, mean_err = err$mean_err, std_err = err$std_err))
+}
+```
+
+The way this whole system works for us is the following:
+* We call `fit_cv` with an `x` matrix, a `y` matrix, and a regression function `FUN` as input
+  + `fit_cv` will call `ten_fold_cv`
+    * `ten_fold_cv` will call `FUN` multiple times
+  + `fit_cv` calls `FUN` one last time
+
+Now we can use these functions to find the best subset. We will iterate over all possible models using the `dummies` matrix. Let's first create some vectors and matrices which we'll use to store the output of `fit_cv` function 
+
+```{r}
+#Vector of mean cross-validation errors
+errors <- numeric(dim(dummies)[1])
+#Vector of cross-validation standard errors
+std_errors <- numeric(dim(dummies)[1])
+#Matrix of estimated parameters
+betas <- matrix(nrow = dim(dummies)[1], ncol = 9)
+```
+
+Now iterate over the dummies matrix
+
+```{r}
+for (i in (1:dim(dummies)[1])){
+  
+  coeff = dummies[i, ]
+  #Let's build an X matrix containing only the parameters we want in our model
+  curX <- cbind(array(1, dim = c(nrow(Xtrain),1)), Xtrain[,which(coeff == 1)])
+  
+  #Fit a linear regression with cross-validation
+  fit <- fit_cv(curX,Ytrain, fit_lin_reg)
+  #Save the mean cv error
+  errors[i] = fit$mean_err
+  #Save the cv std error
+  std_errors[i] = fit$std_err
+  
+  #Save the estimated parameters
+  result <- numeric(8)
+  result[which(coeff == 1)] <- fit$coeff[-1]
+  result <- c(fit$coeff[1], result)
+  betas[i, ] <- result
+}
+```
+
+Now find the best model (with the lowest cross-validation error)
+
+```{r}
+best_err <- min(errors)
+best_std <- std_errors[which.min(errors)]
+print(best_err)
+```
+
+In the table, they don't just take the best model, but choose the least complex model within one standard error of the best.  
+
+Within one standard error, we have all the following models
+```{r}
+dummies[errors > best_err - .5*best_std & errors < best_err + .5*best_std,]
+```
+We can see how many variables each model contains by summing the rows
+
+```{r}
+rowSums(dummies[errors > best_err - .5*best_std & errors < best_err + .5*best_std,])
+```
+
+And use this to choose the simplest model (the one with the lowest number of variables)
+
+```{r}
+dummies[errors > best_err - .5*best_std & errors < best_err + .5*best_std,][which.min(rowSums(dummies[errors > best_err - .5*best_std & errors < best_err + .5*best_std,])),]
+```
+
+So the simplest model is: Y ~ lcavol + lweigth 
+Let's build the column for the output matrix
+
+```{r}
+bestXtrain = Xtrainone[,c(1:3)]
+beta <- fit_lin_reg(bestXtrain, Ytrain)
+
+bestXtestone <- cbind(array(1, dim = c(nrow(Xtest),1)), Xtest[,c(1,2)])
+
+Y_pred_test <- bestXtestone %*% beta
+err_test <- (Ytest - Y_pred_test)
+```
+
+```{r}
+table33$Best_Subset <- c(beta, numeric(6), mean(err_test^2), sd(err_test^2)/sqrt(length(err_test)));
+round(table33 *1000)/1000
+```
+
+
+
+####Ridge Regression
+
+For ridge regression, we will also use cross-validation on the training set to choose the ideal value for the parameter `lambda`. We will be able to reuse our `ten_fold_cv` and `fit_cv` functions, all we need is a new function to fit a ridge regression model. This function will be used as the `FUN` input for `fit_cv` We define this function now:
+
+The only tricky part is that `ten-fold_cv` and `fit_cv` expect as X input a matrix with a leading column of ones. To fit ridge regression, we need to scale the matrices and delete the column of ones as ridge fits a no-intercept model.
+
+```{r}
+fit_ridge <- function(x, y, lambda){
+  ys <- scale(y)
+  xs <- scale(x[,-1])
+  
+  b_ridge <- solve(t(xs) %*% xs + (lambda * diag(dim(xs)[2])), t(xs) %*% ys)
+  d <- sqrt(diag(var(x[,-1])))
+  b_ridge <- b_ridge * sqrt(var(y)) / d
+  
+  return(c(mean(y), b_ridge))
+}
+```
+
+Now we are ready to fit ridge regression models. To find the best lambda we do something similar as for best subset. We iterate over a vector of possible lambdas and fit each model, and find the lambda which minimized cross-validation error.  
+As before, first initialize some empty vectors / matrices to store results. And initialize the lambda vector (from 0 to 100)
+
+```{r}
+lambdas <- (0:100)
+errors <- numeric(length(lambdas))
+std_errors <- numeric(length(lambdas))
+betas <- matrix(nrow = length(lambdas), ncol = 9)
+```
+
+Iterate over `lambdas` and fit the models.
+
+```{r}
+for (i in 1:length(lambdas)){
+  fit <- fit_cv(Xtrainone, Ytrain, function(x,y) fit_ridge(x=x, y=y, lambda = lambdas[i]))
+  
+  errors[i] <- fit$mean_err
+  std_errors[i] <- fit$std_err
+  betas[i,] <- fit$coeff
+}
+```
+
+Find the 'best' lambda
+
+```{r}
+best_err <- min(errors)
+best_std <- std_errors[which.min(errors)]
+best_lambda <- lambdas[which.min(errors)]
+
+print(best_lambda)
+```
+
+So with lambda = 3, we minimize the cv error. However, in the table they want the lambda which gives the simplest model within one standard error of the best model. This means we want lambda to be as large as possible. All the followng lambdas give models within one standard error.
+
+```{r}
+lambdas[which(errors > best_err - .5*best_std & errors < best_err + .5*best_std)]
+```
+
+And so what we want is lambda = 82. However this model does not give the same estimates as the ridge model in the table.
+
+```{r}
+#First model is lambda = 0
+#83'rd model is lambda = 82
+betas[82,]
+```
+
+This is because in the book, they do not use lambda as the parameter to optimize. Instead they use the *effective degrees of freedom* defined in equation 3.50 by:
+$$df(\lambda) = \sum_{j=1}^{p} \frac{d_j^2}{d_j^2 + \lambda}$$
+They optimize over discrete values of $df(\lambda)$ and find the best ridge model to be the one with $df(\lambda)=5$. An decrease of 1 in $df(\lambda)$ corresponds to a large increase of lambda. We suppose that the solution we find of lambda = 89 is situated between $df(\lambda) = 5$ and $df(\lambda) = 4$
+
+Anyways, since we want to reproduce the table, we can use lambda = 22 which corresponds more or less to $df(\lambda) = 5$. We will use this even though it is not the "best" lambda we can come up with through cross-validation (that was lambda = 89).
+
+```{r}
+#This corresponds to lambda = 22
+beta_ridge <- betas[23,] 
+
+Y_pred_test <- Xtestone %*% beta_ridge
+err_test <- (Ytest - Y_pred_test)
+```
+
+```{r}
+table33$Ridge <- c(beta_ridge, mean(err_test^2), sd(err_test^2)/sqrt(length(err_test)));
+round(table33 *1000)/1000
+```
+
+
+
+####Lasso
+
+For Lasso regression, we need to find the optimal value for the parameter t. We will proceed in a very similar fashion as for Ridge regression.
+
+Once again, we will use `ten_fold_cv` and `fit_cv`, but we also need to specify a function to fit the Lasso regression (which will serve as `FUN` input to `fit_cv`). This time we use the CVXR package as computing the lasso solution is a quadratic programming problem.
+
+```{r}
+library(CVXR)
+
+fit_lasso <- function(x, y, t){
+  ys = scale(y)
+  xs = scale(x[,-1])
+  betaHat <- Variable(dim(xs)[2])
+  objective <- Minimize(sum((ys - xs %*% betaHat)^2))
+  constraint <- list(sum(abs(betaHat)) <=  t)
+  problem <- Problem(objective, constraint)
+  b_lasso <- solve(problem)
+  
+  #Scale back the solution
+  d <- sqrt(diag(var(Xtrain)))
+  bl <- b_lasso$getValue(betaHat)*sqrt(var(Ytrain)) / d
+  return(c(mean(y), bl))
+}
+```
+
+The following chunks are the exact same procedure as what we did for Ridge regression, adapted to the Lasso problem. 
+
+This time we will be iterating over a vector of 100 possible values for t, ranging from 0 to 3. We also initialize empty vectors/ matrices to store results.
+
+```{r}
+ts <- seq(from = 0, to = 3, length.out = 100)
+errors <- numeric(length(ts))
+std_errors <- numeric(length(ts))
+betas <- matrix(nrow = length(ts), ncol = 9)
+```
+
+Iterate over `ts`, the vector of t values.
+Attention: this takes about two minutes to compute, as we are doing ten-fold cross validation for all 100 possible values of t.
+
+```{r}
+for (i in 1:length(ts)){
+  #Uncomment the following line to track progress of the loop
+  #print(paste("Iteration", i))
+  fit <- fit_cv(Xtrainone, Ytrain, function(x,y) fit_lasso(x=x, y=y, t = ts[i]))
+  
+  errors[i] <- fit$mean_err
+  std_errors[i] <- fit$std_err
+  betas[i,] <- fit$coeff
+}
+```
+
+Find the *best* t.
+
+```{r}
+best_err <- min(errors)
+best_std <- std_errors[which.min(errors)]
+best_t <- ts[which.min(errors)]
+
+print(best_t)
+```
+
+Now find all t's for which the corresponding model is within one standard error of the best model (t=1.666667)
+
+```{r}
+ts[which(errors > best_err - .5*best_std & errors < best_err + .5*best_std)]
+```
+
+Choose the least complex model. This correpsonds to the model with the lowest t, i.e. t = 6969...
+
+```{r}
+ideal_t <- ts[which(errors > best_err - .5*best_std & errors < best_err + .5*best_std)][1]
+beta_lasso <- betas[which(ts == ideal_t),]
+round(1000 * beta_lasso)/1000
+```
+
+This is almost the same solution as the one in the book, except for the intercept which is slightly different for the table in the book. However, the intercept in the book does not make sense as the intercept for a LASSO model should be the mean of the observed responses. So our model with the intercept of 2.452 makes more sense. We prefer our model. We can now show the full table
+
+```{r}
+Y_pred_test <- Xtestone %*% beta_lasso
+err_test <- (Ytest - Y_pred_test)
+```
+
+Let's print the table. You need to navigate to the second page to see the last line with the std error.
+
+```{r}
+table33$Lasso <- c(beta_lasso, mean(err_test^2), sd(err_test^2)/sqrt(length(err_test)));
+round(table33 *1000)/1000
+```
+
+
+
